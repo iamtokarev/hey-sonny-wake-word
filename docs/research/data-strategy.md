@@ -22,7 +22,7 @@ false-positive set is consumed during training for model selection. Sources:
 
 | Category | Role | Default source |
 |---|---|---|
-| Synthetic positive training audio | Teach the exact “hey sonny” phrase | Piper LibriTTS-R multi-speaker generation |
+| Synthetic positive training audio | Teach the exact “hey sonny” phrase | Piper LibriTTS-R multi-speaker generation; VCTK and L2-ARCTIC as added speaker inventories |
 | Synthetic adversarial negatives | Teach close but unwanted phrases and partials | openWakeWord phoneme-overlap generation plus a short manual list |
 | General negative training features | Provide large-scale ordinary speech, music, and noise | `davidscripka/openwakeword_features` ACAV100M features |
 | Augmentation audio | Mix realistic environmental sound into synthetic clips | License-filtered FSD50K subset; add music only if experiments show it is needed |
@@ -49,6 +49,77 @@ second TTS system initially; the first pilot should establish whether Piper says
 “Sonny” consistently and naturally. Listen to a stratified sample before scaling
 and reject silent, clipped, severely distorted, mispronounced, or incomplete
 clips.
+
+**The real fork is the `.pt` generator path versus the `.onnx` voice path, not
+LibriTTS-R versus “Piper voices”.** LibriTTS-R *is* a Piper voice, published in
+the standard `rhasspy/piper-voices` inventory in both formats. The `.pt` file is
+the VITS training checkpoint, so it exposes the speaker embedding table and
+`generate_audio` can interpolate between two speakers; the exported ONNX has no
+such handle, and `generate_samples_onnx` iterates discrete speaker IDs with no
+`slerp_weights` and no batching. The `.pt` path was chosen for SLERP blending and
+GPU batching, and that choice stands.
+
+The speaker inventory is the reason the choice matters. Of 38 English Piper voice
+models, 31 are single-speaker; downloading every one of them yields 31 speakers.
+LibriTTS is the only place a large speaker count exists. Source:
+[`voices.json`](https://huggingface.co/rhasspy/piper-voices/blob/main/voices.json).
+
+### 1a. Added speaker inventories: VCTK and L2-ARCTIC
+
+In scope as of 2026-08-29. Both are Piper voices in the same VITS family, so they
+are a second *speaker inventory* rather than a second synthesis architecture —
+the distinction
+[synthetic-real-data-mixing.md](synthetic-real-data-mixing.md) identifies as the
+one that matters. Neither reopens the settled multi-TTS question.
+
+| Model | Speakers | Adds |
+|---|---|---|
+| `en_GB-vctk-medium` | 109 | British accents, absent from LibriTTS-R’s US audiobook readers |
+| `en_US-l2arctic-medium` | 24 | Non-native English (Hindi, Korean, Mandarin, Spanish, Arabic, Vietnamese L1) |
+
+L2-ARCTIC is the more valuable of the two for this project, because the target
+speaker’s accent may not be represented anywhere in an American or British voice
+inventory, and no amount of LibriTTS-R speaker blending creates a non-native
+accent.
+
+Two implementation constraints follow from the code. `main()` rejects a mixed
+model list — models must share one file suffix, and only one `.pt` generator is
+supported — so these voices cannot be added to the existing LibriTTS-R call.
+They run as a separate `.onnx` invocation, which does accept several `--model`
+arguments at once because both share that suffix, and the output directories are
+merged afterwards. That invocation has no SLERP blending, so its diversity is
+capped at 133 discrete speakers rather than a blended space.
+
+Sequencing: generate these only after the LibriTTS-R-only candidate has a
+held-out score, and add them as a measured comparison against that baseline on
+the same frozen evaluation revision. Adding them to the first run would make the
+baseline unmeasurable, and the open question is whether a wider speaker inventory
+helps at all — which cannot be answered without the comparison.
+
+**Speaker traversal is the real limit, not the 904 speaker count.** Verified
+2026-08-27 against piper-sample-generator 3.2.0. `generate_samples` iterates
+`itertools.product(range(num_speakers), range(num_speakers))` and SLERP-blends
+each *pair* of speaker embeddings, so every clip is a mixture of two speakers
+and no individual speaker can be pinned. Because that product is ordered, the
+first `num_speakers` clips all pair speaker 0 with someone else. At the
+30,000-clip target with the full 904 speakers, the first element of the pair
+never advances past speaker 32: the run explores a narrow anchored slice of the
+embedding space while appearing to use all 904 voices.
+
+Cap `max_speakers` so the `n²` pair space is small enough to traverse
+completely, choosing `n` near the square root of the clip target. For 30,000
+clips, roughly 100–170 speakers gives at least one full pass over all pairs
+instead of a single anchored row. The upstream README separately recommends a
+value below 904 because the least-represented LibriTTS-R speakers produce
+artifacts, so both reasons point the same way. Note also that the generation
+settings iterator advances once per *batch*, not per clip, so a large GPU batch
+size makes every clip in that batch share one length and noise scale; keep the
+batch small relative to the number of setting combinations. Source:
+[`generate_samples` speaker and settings iteration](https://github.com/rhasspy/piper-sample-generator/blob/master/piper_sample_generator/__main__.py).
+
+`notebooks/piper_exploration.ipynb` exercises this path at exploration scale and
+reconstructs a per-clip manifest of speaker pair and generation settings, which
+the generator itself does not record.
 
 For scale, follow the upstream minimum of 20,000 positive training examples for
 the first serious candidate; 30,000 is a sensible starting target already used
@@ -198,6 +269,32 @@ license, and final model license are separate questions. A private personal-use
 workflow avoids unnecessary publication risk, but it does not erase attribution
 or non-commercial conditions.
 
+## Settled: one TTS family, no owner voice in the first candidate
+
+Decided 2026-08-28. Piper/VITS remains the only TTS family, and the first serious
+candidate trains on synthetic audio alone. This closes the previously open
+question about adding a second TTS family. It does not constrain the speaker
+inventory within that family: VCTK and L2-ARCTIC were added to scope on
+2026-08-29 (§1a) precisely because they widen speaker coverage without
+introducing a second synthesis architecture.
+
+The evidence is in
+[synthetic-real-data-mixing.md](synthetic-real-data-mixing.md). In short: the
+only direct single-TTS versus multi-TTS comparison found in keyword spotting is
+null, because the shortcut a model learns is “generated versus recorded” rather
+than any individual generator’s signature — a property a second generator
+shares. Kokoro is a poor specific choice regardless, offering 28 English voices
+against LibriTTS-R’s 904 blended embeddings and a documented weakness on short
+utterances. Real recorded audio is the lever that moves false-reject rate, but
+it is a second revision: it only pays off with session-matched real negatives,
+which do not exist yet.
+
+Two consequences for this note. Augmentation is not a substitute for recording
+sessions when real audio is eventually added, contrary to what the augmentation
+section might suggest for synthetic clips. And Kokoro, if used at all later,
+belongs in *evaluation* as a generator absent from training, not in the training
+mix.
+
 ## Recommended default plan
 
 1. Generate and audit a 1,000-positive/1,000-validation Piper pilot for the
@@ -214,13 +311,24 @@ or non-commercial conditions.
    ACAV100M feature array.
 7. Freeze an independently recorded held-out evaluation revision before final
    model selection. Keep it outside training storage paths and manifests.
+8. Score the LibriTTS-R-only candidate, then generate a VCTK + L2-ARCTIC set via
+   the `.onnx` path (§1a) and score a second candidate against the same frozen
+   evaluation revision. Keep the two candidates otherwise identical so the
+   speaker-inventory effect is the only variable.
 
 ## Unresolved empirical questions
 
 - Does Piper pronounce “Sonny” correctly across its speaker range, and which
   speaker embeddings generate unusable artifacts?
-- Is one TTS family sufficiently diverse, or does held-out recall justify adding
-  a second generator later?
+- Does capping `max_speakers` for full pair coverage improve held-out recall
+  over leaving it unset, or is the anchored slice of the embedding space already
+  diverse enough because every clip is a two-speaker blend?
+- Does adding the VCTK and L2-ARCTIC speaker inventories improve held-out recall
+  over LibriTTS-R alone, and is the gain worth losing SLERP blending for those
+  133 speakers? Planned as step 8 of the default plan.
+- Do any of L2-ARCTIC’s 24 non-native speakers actually resemble the target
+  speaker’s accent, or is the corpus’s L1 coverage the wrong set? This is
+  answerable by listening before any training run.
 - Which explicit confusing phrases actually cause false activations beyond the
   automatic phonetic negatives?
 - Does the upstream -10 to 15 dB background-mixing range help or harm this short
