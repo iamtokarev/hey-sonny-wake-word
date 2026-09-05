@@ -1,4 +1,4 @@
-# Hey Sonny wake-word
+# `Hey Sonny` wake-word
 
 A "Hey Sonny" wake-word model: openWakeWord's training recipe, Piper-
 synthesized positives, and Hugging Face Jobs for the paid runs, exported to a
