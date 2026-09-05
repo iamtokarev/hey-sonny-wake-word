@@ -4,7 +4,7 @@ A "Hey Sonny" wake-word model: openWakeWord's training recipe, Piper-
 synthesized positives, and Hugging Face Jobs for the paid runs, exported to a
 self-contained ONNX classifier for local inference.
 
-
+[![Hugging Face](https://img.shields.io/badge/🤗%20Hugging%20Face-Model-yellow)](https://huggingface.co/iamtokarev/hey-sonny-wake-word)
 
 Full experiment log, costs, and decisions: [`docs/experiment-plan.md`](docs/experiment-plan.md).
 
